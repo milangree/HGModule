@@ -16,11 +16,13 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [34], shadows = [FileRenameShadow::class])
 class RemoteProfilesTest {
     private val app get() = RuntimeEnvironment.getApplication()
-    private fun raw() = app.assets.open("adaptation/gp-7.3.9.32-h002.json").bufferedReader().use { it.readText() }
-    private fun newer() = JSONObject(raw()).put("revision", 3).toString()
+    private fun raw() = app.assets.open("adaptation/gp-7.3.9.32-h003.json").bufferedReader().use { it.readText() }
+    private val baseRevision get() = ProfileJson.parse(raw()).revision
+    private val newerRevision get() = baseRevision + 1
+    private fun newer() = JSONObject(raw()).put("revision", newerRevision).toString()
     private fun manifest(raw: String): JSONObject {
         val p = ProfileJson.parse(raw)
         return JSONObject().put("schemaVersion", 1).put("hookContract", "guoplus-hooks-v1").put("profiles", JSONArray().put(
@@ -45,15 +47,15 @@ class RemoteProfilesTest {
         val result = download(manifest(newer()), newer())
         assertEquals(1, result.checked); assertEquals(1, result.profiles.size)
         AdaptationStore.importProfiles(result.profiles)
-        assertEquals(3, ProfileJson.parse(mirror.all.values.single() as String).revision)
+        assertEquals(newerRevision, ProfileJson.parse(mirror.all.values.single() as String).revision)
         AdaptationStore.loadAssets(app)
-        assertEquals(3, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
+        assertEquals(newerRevision, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
         assertEquals(50, config.getInt("guoplus_control_opacity", 0))
     }
 
     @Test fun unchangedOrOlderRemoteDoesNotDownloadOrDowngrade() {
-        for (revision in listOf(2, 1)) {
-            val content = if (revision == 2) raw() else JSONObject(raw()).put("revision", revision).toString()
+        for (revision in listOf(baseRevision, baseRevision - 1)) {
+            val content = if (revision == baseRevision) raw() else JSONObject(raw()).put("revision", revision).toString()
             val calls = mutableListOf<String>()
             val result = RemoteProfiles.download(AdaptationStore.profiles()) {
                 calls.add(it); assertEquals("manifest.json", it); manifest(content).toString()
@@ -85,9 +87,9 @@ class RemoteProfilesTest {
         assertThrows(java.io.IOException::class.java) {
             RemoteProfiles.download(AdaptationStore.profiles()) { throw java.io.IOException("offline") }
         }
-        val incoming = JSONObject(raw()).put("revision", 4).toString()
+        val incoming = JSONObject(raw()).put("revision", newerRevision + 1).toString()
         assertThrows(IllegalArgumentException::class.java) { download(manifest(incoming), incoming + " ") }
-        assertEquals(3, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
+        assertEquals(newerRevision, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
     }
 
     @Test fun identityContractAndMalformedFileAreRejectedAfterHashValidation() {
@@ -99,7 +101,7 @@ class RemoteProfilesTest {
         val index = manifest(incoming)
         index.getJSONArray("profiles").getJSONObject(0).put("sha256", RemoteProfiles.sha256(broken))
         assertThrows(IllegalArgumentException::class.java) { download(index, broken) }
-        assertEquals(2, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
+        assertEquals(baseRevision, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
     }
 
     @Test fun maliciousManifestCannotEscapeRepositoryOrSupplyUnboundedFiles() {
@@ -125,7 +127,7 @@ class RemoteProfilesTest {
             val result = download(index, content)
             AdaptationStore.importProfiles(result.profiles)
         }
-        assertEquals(2, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
+        assertEquals(baseRevision, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
     }
 
     @Test fun hostDownloadSurvivesColdStartupWithoutOpeningTheModuleAndRemainsANeighbour() {
@@ -135,7 +137,7 @@ class RemoteProfilesTest {
         val p = ProfileJson.parse(json.toString())
         AdaptationStore.cacheProfile(dir, p)
         AdaptationStore.loadAssets(app); AdaptationStore.loadDirectory(dir)
-        assertEquals(3, AdaptationStore.select(TargetNames.CN_PACKAGE, "7.3.10.32", 731032, dir)!!.revision)
+        assertEquals(newerRevision, AdaptationStore.select(TargetNames.CN_PACKAGE, "7.3.10.32", 731032, dir)!!.revision)
         assertEquals("7.3.10.32", AdaptationStore.nearest(TargetNames.CN_PACKAGE, "7.3.11.32")!!.names.versionName)
         assertNull(AdaptationStore.select(TargetNames.CN_PACKAGE, "7.3.11.32", 731132, dir))
         assertFalse(File(dir, "${TargetNames.CN_PACKAGE}-731132.json").exists())
@@ -143,7 +145,7 @@ class RemoteProfilesTest {
         val file = File(dir, "${TargetNames.CN_PACKAGE}-731032.json")
         File(file.path + ".bak").writeText(p.raw); file.writeText("interrupted")
         AdaptationStore.loadDirectory(dir)
-        assertEquals(3, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.10.32", 731032)!!.revision)
+        assertEquals(newerRevision, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.10.32", 731032)!!.revision)
     }
 
     @Test fun hostFetchesOnlyItsOwnPackageAndRepositoryManifestMatchesBundledFiles() {
@@ -176,9 +178,9 @@ class RemoteProfilesTest {
             }
         }
         assertEquals(2, checks)
-        assertEquals(3, ProfileJson.parse(File(dir, "${TargetNames.CN_PACKAGE}-73932.json").readText()).revision)
+        assertEquals(newerRevision, ProfileJson.parse(File(dir, "${TargetNames.CN_PACKAGE}-73932.json").readText()).revision)
         AdaptationStore.loadAssets(app)
-        assertEquals(3, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
+        assertEquals(newerRevision, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
         assertEquals(50, user.getInt("guoplus_control_opacity", 0))
     }
 
@@ -190,12 +192,12 @@ class RemoteProfilesTest {
         }
         assertEquals(1, result.profiles.size)
         AdaptationStore.loadAssets(app); AdaptationStore.loadDirectory(dir)
-        assertEquals(3, AdaptationStore.select(TargetNames.CN_PACKAGE, "7.3.9.32", 73932, dir)!!.revision)
+        assertEquals(newerRevision, AdaptationStore.select(TargetNames.CN_PACKAGE, "7.3.9.32", 73932, dir)!!.revision)
         val synced = mutableListOf<AdaptationProfile>()
         assertThrows(java.io.IOException::class.java) {
             RemoteAdaptation.updateHost(dir, TargetNames.CN_PACKAGE, { synced.add(it) }) { throw java.io.IOException("offline") }
         }
-        assertTrue(synced.any { it.names.versionName == "7.3.9.32" && it.revision == 3 })
+        assertTrue(synced.any { it.names.versionName == "7.3.9.32" && it.revision == newerRevision })
     }
 
     private class Connection(private val status: Int, private val body: ByteArray, private val length: Long = body.size.toLong()) :

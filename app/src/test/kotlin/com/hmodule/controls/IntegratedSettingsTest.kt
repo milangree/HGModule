@@ -139,7 +139,7 @@ class IntegratedSettingsTest {
         manager.policy = manager.policy.copy(selected = setOf(ControlTarget.AUTHOR_DECLARATION))
         manager.sync(root)
         assertEquals(View.VISIBLE,title.visibility)
-        assertEquals(View.GONE,declaration.visibility)
+        assertEquals(View.INVISIBLE,declaration.visibility)
         manager.policy = manager.policy.copy(masterEnabled = false)
         manager.sync(root)
         assertEquals(View.VISIBLE,declaration.visibility)

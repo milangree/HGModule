@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "hookContract": "guoplus-hooks-v1",
-  "revision": 2,
+  "revision": 3,
   "versionCode": 73932,
   "profileId": "CN-7.3.9.32",
   "host": {
@@ -257,7 +257,7 @@
           "fn8": "like",
           "i1y": "share",
           "kvu": "fullscreen",
-          "egm": "series_info",
+          "egm": "series_banner",
           "g41": "series_info",
           "hvu": "series_info",
           "egh": "series_info",

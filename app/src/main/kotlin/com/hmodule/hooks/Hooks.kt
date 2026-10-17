@@ -36,6 +36,9 @@ import com.hmodule.controls.ControlSettings
 import com.hmodule.controls.ControlVisibilityManager
 import com.hmodule.controls.PlaybackDrawer
 import com.hmodule.controls.NativePlaybackDrawer
+import com.hmodule.controls.DoubleTapAction
+import com.hmodule.controls.DoubleTapRouter
+import com.hmodule.controls.CoalescedViewSyncScheduler
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedInterface.Hooker
 
@@ -49,7 +52,9 @@ object Hooks {
     private var gStatusOn = false
     private var gControlOn = false
     private var gCleanScreenOn = false
+    private var gControlOpacity = 100
     private var controlSettings: ControlSettings? = null
+    private var reconcileControlVisibilityHook: (() -> Unit)? = null
     private val controlVisibility = ControlVisibilityManager { block -> internalViewMutation { block() } }
     private val playbackDrawer = PlaybackDrawer(::controlPolicy, ::toggleCleanScreen) { showPanel(null) }
     private val nativePlaybackDrawer = NativePlaybackDrawer(::controlPolicy) { showPanel(null) }
@@ -57,12 +62,27 @@ object Hooks {
     private fun controlPolicy(): ControlPolicy = ControlPolicy(
         gMasterOn, gControlOn && featureEnabled("controls"), controlSettings?.selected() ?: emptySet(),
         gRestoreControlsOnPause && featureEnabled("playback"), gVideoPaused,
-        if (featureEnabled("controls")) controlSettings?.opacityPercent() ?: 100 else 100,
+        if (featureEnabled("controls")) gControlOpacity else 100,
         gCleanScreenOn && featureEnabled("playback") && featureEnabled("controls"),
+        gKeepDanmaku,
     )
 
     private fun pauseRestoresControls(): Boolean =
         gMasterOn && gCleanScreenOn && gRestoreControlsOnPause && gVideoPaused
+
+    private fun pauseTrackingActive(): Boolean =
+        gMasterOn && gCleanScreenOn && gRestoreControlsOnPause &&
+            featureEnabled("playback") && featureEnabled("controls")
+
+    private fun controlEffectsActive(): Boolean = gMasterOn && featureEnabled("controls") &&
+        (gControlOn || gCleanScreenOn || gControlOpacity < 100)
+
+    private fun isControlHostActivity(activity: Activity?): Boolean = activity?.javaClass?.name in setOf(
+        "com.dragon.read.pages.main.MainFragmentActivity",
+        "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity",
+        "com.dragon.read.component.shortvideo.impl.seriesdetail.ShortSeriesDetailActivity",
+        "com.dragon.read.component.shortvideo.impl.albumdetail.VideoAlbumDetailActivity",
+    )
 
     private fun toggleCleanScreen() {
         if (!featureEnabled("playback") || !featureEnabled("controls")) {
@@ -80,26 +100,36 @@ object Hooks {
     private fun syncCustomControls(root: View?) {
         val decor = gCurrentActivity?.window?.decorView ?: return
         if (root == null || root !== decor && !isInsideCurrentActivityDecor(root)) return
+        if (controlEffectsActive() && controlSyncDeferred()) {
+            controlSyncScheduler.request(root)
+            return
+        }
         controlVisibility.policy = controlPolicy()
         controlVisibility.profileId = gNames.profileId
         controlVisibility.resourceOverrides = gNames.controlTargets
         controlVisibility.clearHostNames = gNames.clearHostNames.toSet()
         controlVisibility.bottomBackdropName = gNames.bottomBackdropName
-        if (!gMasterOn || !gControlOn && !gCleanScreenOn && controlVisibility.policy.opacityPercent == 100) {
+        if (!controlEffectsActive()) {
+            gPlayerPageActive = false
             restorePauseForcedViews()
             controlVisibility.restoreAll()
+            syncStatusBar(gCurrentActivity)
             return
         }
         val activityName = gCurrentActivity?.javaClass?.name.orEmpty()
-        if (activityName !in setOf(
-                "com.dragon.read.pages.main.MainFragmentActivity",
-                "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity",
-                "com.dragon.read.component.shortvideo.impl.seriesdetail.ShortSeriesDetailActivity",
-                "com.dragon.read.component.shortvideo.impl.albumdetail.VideoAlbumDetailActivity",
-            )) { controlVisibility.policy = controlPolicy().copy(masterEnabled = false); restorePauseForcedViews(); controlVisibility.restoreAll(); return }
+        if (!isControlHostActivity(gCurrentActivity)) {
+            gPlayerPageActive = false
+            controlVisibility.policy = controlPolicy().copy(masterEnabled = false)
+            restorePauseForcedViews()
+            controlVisibility.restoreAll()
+            syncStatusBar(gCurrentActivity)
+            return
+        }
         val hasPlayer = shortVideoHolderSnapshot().any { isShortVideoHolderVisible(it.first) } ||
             activityName != "com.dragon.read.pages.main.MainFragmentActivity" && videoToolbarLayerSnapshot().isNotEmpty()
+        gPlayerPageActive = hasPlayer
         controlVisibility.policy = controlPolicy().forPage(hasPlayer)
+        syncStatusBar(gCurrentActivity)
         if (!controlVisibility.policy.temporarilyRestored) restorePauseForcedViews()
         fun bindProgress(view: View) {
             if (view.tag == ControlVisibilityManager.MODULE_UI_TAG) return
@@ -127,6 +157,7 @@ object Hooks {
     private const val DEFAULT_SPEED_VALUE_PREF = "default_speed_value"
     private val DEFAULT_SPEED_OPTIONS = floatArrayOf(0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 3.0f)
     private var gDoubleTapCommentOn = false
+    private var gKeepDanmaku = true
 
     private var gOledProtectOn = false
 
@@ -262,6 +293,7 @@ object Hooks {
 
     private var gReceiverRegistered = false
     private var gCurrentActivity: Activity? = null
+    @Volatile private var gPlayerPageActive = false
 
     private val gTargetIdSet = mutableSetOf<Int>()
     private val gProgressIdSet = mutableSetOf<Int>()
@@ -273,6 +305,12 @@ object Hooks {
     @Volatile private var gTargetVersionCode = -1L
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var gControlSyncAfter = 0L
+    private fun controlSyncDeferred(): Boolean = android.os.SystemClock.uptimeMillis() < gControlSyncAfter
+    private val controlSyncScheduler = CoalescedViewSyncScheduler(
+        post = { runnable -> mainHandler.postDelayed(runnable, 120L) },
+        sync = ::syncCustomControls,
+    )
     private var appCtx: Context? = null
     private var gIsNight = false
     private var gSettingsActivity: Activity? = null
@@ -306,6 +344,8 @@ object Hooks {
         val changed = synchronized(changedConfigKeys) { changedConfigKeys.toSet().also { changedConfigKeys.clear() } }
         val wasMaster = gMasterOn
         reloadPreferences()
+        updatePeriodicScanState()
+        reconcileControlVisibilityHook?.invoke()
         if (wasMaster && !gMasterOn) {
             restoreAllSavedViews()
             restoreShortVideoNativeControls()
@@ -314,7 +354,7 @@ object Hooks {
         }
         if (!gRefreshOff || !gMasterOn) restoreRefreshAccessories()
         gCurrentActivity?.let {
-            if (gMasterOn && gStatusOn) applyCleanTop(it) else showStatusBar(it)
+            syncStatusBar(it)
             if (gMasterOn && gNavBarOff) applyNavBar(it) else showNavBar(it)
         }
         createNotification(appCtx ?: gCurrentActivity ?: return@Runnable)
@@ -326,6 +366,7 @@ object Hooks {
     }
     private fun reloadPreferences() {
         gMasterOn = gPrefs!!.getBoolean("master_on", false)
+        gControlOpacity = controlSettings?.opacityPercent() ?: 100
         gStatusOn = gPrefs!!.getBoolean("status_bar", false)
         gControlOn = gPrefs!!.getBoolean("control_hide", false) && featureEnabled("controls")
         gCleanScreenOn = gPrefs!!.getBoolean("guoplus_clean_screen", false) && featureEnabled("playback") && featureEnabled("controls")
@@ -340,6 +381,7 @@ object Hooks {
         gDefaultSpeedOn = gPrefs!!.getBoolean(DEFAULT_SPEED_PREF, false) && featureEnabled("speed")
         gDefaultSpeed = normalizeDefaultSpeed(gPrefs!!.getFloat(DEFAULT_SPEED_VALUE_PREF, 1.0f))
         gDoubleTapCommentOn = gPrefs!!.getBoolean("double_tap_comment", false) && featureEnabled("comments")
+        gKeepDanmaku = gPrefs!!.getBoolean("keep_danmaku", true)
         gOledProtectOn = gPrefs!!.getBoolean("oled_protect", false) && featureEnabled("brightness")
         gNotificationMenuOn = gPrefs!!.getBoolean("notification_menu", false)
         gDownloadLimitUnlimitOn = gPrefs!!.getBoolean(DOWNLOAD_LIMIT_PREF, false)
@@ -1214,7 +1256,7 @@ object Hooks {
 
     private fun restoreAllSavedViews() {
         controlVisibility.policy = controlPolicy()
-        controlVisibility.restoreAll()
+        controlVisibility.clear()
         restoreFeedViewportBottomMargins(clear = true)
         restoreBottomLayoutReclaim()
         val entries = synchronized(gSavedViewStates) {
@@ -1445,6 +1487,18 @@ object Hooks {
             }
         }
         return false
+    }
+
+    private fun doubleTapAction(event: android.view.MotionEvent): DoubleTapAction {
+        val activity = gCurrentActivity
+        val bounds = try {
+            if (Build.VERSION.SDK_INT >= 30) activity?.windowManager?.currentWindowMetrics?.bounds
+            else null
+        } catch (_: Throwable) { null }
+        val left = bounds?.left ?: 0
+        val width = bounds?.width() ?: activity?.resources?.displayMetrics?.widthPixels ?: 0
+        val rawX = if (event.rawX != 0f) event.rawX else event.x
+        return DoubleTapRouter.action(rawX, left, width)
     }
 
     private fun registerShortSeriesFragment(fragment: Any?) {
@@ -1775,7 +1829,9 @@ object Hooks {
         return null
     }
     private fun refreshVideoPauseState(reason: String, fallback: Boolean? = null) {
+        if (!pauseTrackingActive()) return
         mainHandler.postDelayed({
+            if (!pauseTrackingActive()) return@postDelayed
             val shortVideoState = detectPausedFromShortVideoHolders()
             val detected = shortVideoState ?: detectPausedFromVideoLayers() ?: fallback
             if (detected != null) {
@@ -1789,11 +1845,10 @@ object Hooks {
     private fun setVideoPaused(paused: Boolean, reason: String = "callback") {
         val changed = gVideoPaused != paused
         gVideoPaused = paused
-        syncCustomControls(gCurrentActivity?.window?.decorView)
         gLastVideoStateAt = android.os.SystemClock.uptimeMillis()
         gLastVideoStateReason = reason
 
-        if (!gMasterOn || !gCleanScreenOn || !gRestoreControlsOnPause) return
+        if (!pauseTrackingActive() || !changed) return
         if (paused) {
             setVideoToolbarsVisible(true)
             forcePauseRestoreControls()
@@ -1848,15 +1903,21 @@ object Hooks {
         try {
             if (gCurrentActivity == null) return
             val decor = gCurrentActivity!!.window.decorView
+            if (!gMasterOn) {
+                syncCustomControls(decor)
+                restoreRefreshAccessories()
+                return
+            }
             gNames.hideIdNames.forEach { resolveEntryId(it, decor) }
             gNames.progressIdNames.forEach { resolveEntryId(it, decor, gProgressIdSet, "进度条资源") }
             resolvePauseRestoreIds(decor)
-            syncCustomControls(decor)
             val allRoots = collectAllWindows()
             if (allRoots.isEmpty() && decor != null) allRoots.add(decor)
             for (root in allRoots) {
-                if (gMasterOn && gControlOn && !pauseRestoresControls()) scanTreeQuick(root)
-                else scanTreeRestore(root)
+                if (root !== decor) {
+                    if (controlEffectsActive() && !pauseRestoresControls()) scanTreeQuick(root)
+                    else scanTreeRestore(root)
+                }
 
             }
             if (gMasterOn && gRefreshOff) for (root in allRoots) scanTreeRefreshAccessory(root)
@@ -1869,28 +1930,40 @@ object Hooks {
     }
 
     private var gScanRunnable: Runnable? = null
+    private fun periodicScanNeeded(): Boolean = gMasterOn &&
+        (controlEffectsActive() || gRefreshOff || pauseRestoresControls())
+
+    private fun updatePeriodicScanState() {
+        if (periodicScanNeeded()) startPeriodicScan() else stopPeriodicScan()
+    }
+
     private fun startPeriodicScan() {
         stopPeriodicScan()
+        if (!periodicScanNeeded()) return
         gScanRunnable = object : Runnable {
             override fun run() {
+                if (!periodicScanNeeded()) {
+                    gScanRunnable = null
+                    return
+                }
                 try {
-                    syncCustomControls(gCurrentActivity?.window?.decorView)
-                    if (pauseRestoresControls()) {
-                        forcePauseRestoreControls()
-                    }
-                    if (gMasterOn && gRefreshOff) {
-                        val allRoots3 = collectAllWindows()
-                        for (root in allRoots3) scanTreeRefreshAccessory(root)
+                    if (!controlSyncDeferred()) {
+                        syncCustomControls(gCurrentActivity?.window?.decorView)
+                        if (gMasterOn && gRefreshOff) {
+                            val allRoots3 = collectAllWindows()
+                            for (root in allRoots3) scanTreeRefreshAccessory(root)
+                        }
                     }
                 } catch (_: Exception) {}
-                mainHandler.postDelayed(this, 400)
+                mainHandler.postDelayed(this, 1000)
             }
         }
-        mainHandler.postDelayed(gScanRunnable!!, 400)
+        mainHandler.postDelayed(gScanRunnable!!, 1000)
     }
     private fun stopPeriodicScan() {
         gScanRunnable?.let { mainHandler.removeCallbacks(it) }
         gScanRunnable = null
+        controlSyncScheduler.clear()
     }
     private fun applyToCurrent() { mainHandler.post { scanAllWindows() } }
 
@@ -1914,7 +1987,29 @@ object Hooks {
     }
 
     private fun shouldHideStatusBar(): Boolean {
-        return gMasterOn && gStatusOn
+        if (!gMasterOn) return false
+        if (gStatusOn) return true
+        // Native status-height getters run during measurement. Do not construct a
+        // ControlPolicy and read every control preference from that hot path.
+        return gPlayerPageActive && gCleanScreenOn && featureEnabled("controls") && featureEnabled("playback") &&
+            !(gRestoreControlsOnPause && gVideoPaused)
+    }
+
+    private data class StatusBarState(val hidden: Boolean, val windowed: Boolean)
+    private val statusBarStates = java.util.WeakHashMap<Activity, StatusBarState>()
+
+    private fun syncStatusBar(activity: Activity?, force: Boolean = false) {
+        if (activity == null) return
+        val hidden = shouldHideStatusBar()
+        val previous = statusBarStates[activity]
+        // Do not rewrite the host window when the module never hid its status bar.
+        if (!hidden && previous?.hidden != true) return
+        val state = StatusBarState(hidden, isWindowedMode(activity))
+        if (!force && state == previous) return
+        // Store before changing Window attributes: those changes may dispatch native
+        // callbacks which synchronously request another control synchronization.
+        statusBarStates[activity] = state
+        if (hidden) applyCleanTop(activity) else showStatusBar(activity)
     }
 
     private fun updateSeriesMallTopMargin(act: Activity, statusHidden: Boolean) {
@@ -2041,7 +2136,7 @@ object Hooks {
             applyOnce()
 
             for (delay in longArrayOf(120L, 360L)) mainHandler.postDelayed({
-                if (!act.isFinishing && isWindowedMode(act) && gMasterOn && gStatusOn) {
+                if (!act.isFinishing && isWindowedMode(act) && shouldHideStatusBar()) {
                     applyOnce()
                     refreshShortVideoWindowLayout(act)
                 }
@@ -2064,7 +2159,7 @@ object Hooks {
                 gLastWindowedMode = windowed
                 LogUtil.info("window mode -> ${if (windowed) "windowed" else "fullscreen"}, reason=$reason")
             }
-            if (gStatusOn) applyCleanTop(act) else showStatusBar(act)
+            syncStatusBar(act)
             if (gNavBarOff) applyNavBar(act) else showNavBar(act)
             if (refreshLayout) refreshShortVideoWindowLayout(act)
         }, delay)
@@ -2080,7 +2175,7 @@ object Hooks {
         mainHandler.postDelayed({
             if (act.isFinishing) return@postDelayed
             if (refreshLayout) refreshShortVideoWindowLayout(act)
-            if (gRestoreControlsOnPause) {
+            if (pauseTrackingActive()) {
                 refreshVideoPauseState("series-window:$reason")
             }
             scanAllWindows()
@@ -2088,7 +2183,7 @@ object Hooks {
     }
 
     private fun applyCleanTop(act: Activity?) {
-        if (act == null || !gMasterOn || !gStatusOn) return
+        if (act == null || !shouldHideStatusBar()) return
         if (isWindowedMode(act)) {
             applyWindowedTop(act)
             return
@@ -2328,10 +2423,18 @@ object Hooks {
         for ((engine, supported) in engines) selectedResolution(supported)?.let { applyResolutionToEngine(engine, it) }
     }
 
+    // Runs in the host process: check its permission below, rather than the module manifest.
+    @android.annotation.SuppressLint("NotificationPermission")
     private fun createNotification(ctx: Context) {
         try {
             val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (!gNotificationMenuOn) {
+                nm.cancel(9999)
+                return
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 nm.cancel(9999)
                 return
             }
@@ -2347,6 +2450,8 @@ object Hooks {
             nm.notify(9999, n.build())
         } catch (e: Exception) { LogUtil.error("通知", e) }
     }
+    // The legacy overload is used only below API 33; newer hosts use NOT_EXPORTED.
+    @android.annotation.SuppressLint("UnspecifiedRegisterReceiverFlag")
     private fun ensureReceiver(ctx: Context) {
         if (gReceiverRegistered) return
         try {
@@ -2356,7 +2461,7 @@ object Hooks {
                 }
             }
             val filter = IntentFilter("$gPkg.GuoPlus.TOGGLE").apply { addAction("$gPkg.GuoPlus.OPEN_PANEL"); addAction("$gPkg.GuoPlus.RESTART") }
-            if (Build.VERSION.SDK_INT >= 33) ctx.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) ctx.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
             else ctx.registerReceiver(receiver, filter)
             gReceiverRegistered = true
         } catch (e: Exception) { LogUtil.error("receiver", e) }
@@ -3192,14 +3297,20 @@ object Hooks {
                         .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                         .intercept(Hooker { chain ->
                             if (!gMasterOn || !gDoubleTapCommentOn) return@Hooker chain.proceed()
+                            val event = chain.getArg(0) as? android.view.MotionEvent
                             val now = android.os.SystemClock.uptimeMillis()
 
                             gSuppressDoubleTapLikeUntil = maxOf(gSuppressDoubleTapLikeUntil, now + 1500L)
 
                             if (now - gLastDoubleTapCommentAt > 350L) {
                                 gLastDoubleTapCommentAt = now
-                                val opened = openCurrentCommentFromDoubleTap()
-                                LogUtil.incr(if (opened) "doubleTapOpenCommentOK" else "doubleTapOpenCommentNoAgency")
+                                if (event != null && doubleTapAction(event) == DoubleTapAction.CLEAN_SCREEN) {
+                                    toggleCleanScreen()
+                                    LogUtil.incr("doubleTapToggleCleanScreen")
+                                } else {
+                                    val opened = openCurrentCommentFromDoubleTap()
+                                    LogUtil.incr(if (opened) "doubleTapOpenCommentOK" else "doubleTapOpenCommentNoAgency")
+                                }
                             } else {
                                 LogUtil.incr("doubleTapDuplicateConsumed")
                             }
@@ -3324,7 +3435,7 @@ object Hooks {
                     if (focused) {
                         val a = chain.thisObject as? Activity
                         try {
-                            if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
+                            syncStatusBar(a, force = true)
                             if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
                         } catch (_: Exception) {}
                     }
@@ -3573,15 +3684,18 @@ object Hooks {
                 val c = Class.forName(className, false, classLoader)
                 ham(c, "onPlaybackStateChanged", hookId) { chain ->
                     val result = chain.proceed()
+                    val trackPause = pauseTrackingActive()
+                    val applySpeed = defaultSpeedEnabledNow()
+                    if (!trackPause && !applySpeed) return@ham result
                     try {
                         val state = chain.args.lastOrNull { it is Int } as? Int
                         when (state) {
                             1 -> {
-                                setVideoPaused(false, "$className#state=1")
-                                scheduleDefaultSpeedApply("$className#state=1")
+                                if (trackPause) setVideoPaused(false, "$className#state=1")
+                                if (applySpeed) scheduleDefaultSpeedApply("$className#state=1")
                             }
-                            2 -> setVideoPaused(true, "$className#state=2")
-                            0, 3 -> if (gVideoPaused) refreshVideoPauseState("$className#state=$state", false)
+                            2 -> if (trackPause) setVideoPaused(true, "$className#state=2")
+                            0, 3 -> if (trackPause && gVideoPaused) refreshVideoPauseState("$className#state=$state", false)
                         }
                     } catch (e: Throwable) { LogUtil.warn("playback state parse failed: $className: $e") }
                     result
@@ -3600,6 +3714,9 @@ object Hooks {
                 val c = Class.forName(className, false, classLoader)
                 ham(c, gNames.shortStateMethod, "shortState_${classIndex}") { chain ->
                     val result = chain.proceed()
+                    val trackPause = pauseTrackingActive()
+                    val applySpeed = defaultSpeedEnabledNow()
+                    if (!trackPause && !applySpeed) return@ham result
                     try {
                         val holder = chain.thisObject
                         val state = chain.args.lastOrNull { it is Int } as? Int
@@ -3607,8 +3724,8 @@ object Hooks {
                         if (state == 1 || state == 2) {
                             mainHandler.post {
                                 if (isShortVideoHolderVisible(holder)) {
-                                    setVideoPaused(state == 2, "$className#${gNames.shortStateMethod}=$state")
-                                    if (state == 1) scheduleDefaultSpeedApply("$className#${gNames.shortStateMethod}=1")
+                                    if (trackPause) setVideoPaused(state == 2, "$className#${gNames.shortStateMethod}=$state")
+                                    if (applySpeed && state == 1) scheduleDefaultSpeedApply("$className#${gNames.shortStateMethod}=1")
                                 }
                             }
                         }
@@ -3631,7 +3748,7 @@ object Hooks {
                 val result = chain.proceed()
 
                 registerShortVideoHolder(chain.thisObject, 0)
-                if (gRestoreControlsOnPause) refreshVideoPauseState("short-holder-bind")
+                if (pauseTrackingActive()) refreshVideoPauseState("short-holder-bind")
                 result
             }
 
@@ -3859,6 +3976,7 @@ object Hooks {
             module.hook(c.getDeclaredMethod("onMeasure", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType))
                 .setId("guoplusInteractionMeasure").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(Hooker { chain ->
+                    if (!controlEffectsActive()) return@Hooker chain.proceed()
                     val host = chain.thisObject as? ViewGroup
                     if (host == null) chain.proceed()
                     else controlVisibility.withInteractionMeasurement(host) { chain.proceed() }
@@ -3866,26 +3984,34 @@ object Hooks {
         } catch (e: Throwable) { LogUtil.warn("guoplus interaction measure hook: $e") }
 
         try {
-            val c = Class.forName("android.view.LayoutInflater", false, classLoader)
-            ham(c, "inflate", "inf") { chain ->
-                val result = chain.proceed()
-                if (result is ViewGroup) {
-                    LogUtil.incr("inflate")
-                    gNames.hideIdNames.forEach { resolveEntryId(it, result) }
-                    gNames.progressIdNames.forEach { resolveEntryId(it, result, gProgressIdSet, "进度条资源") }
-                    resolvePauseRestoreIds(result)
-                    if (gMasterOn && gControlOn && !pauseRestoresControls()) scanTreeQuick(result)
-                    if (gMasterOn && gRefreshOff) scanTreeRefreshAccessory(result)
+            val visibilityMethod = Class.forName("android.view.View", false, classLoader)
+                .getDeclaredMethod("setVisibility", Int::class.javaPrimitiveType)
+            val alphaMethod = Class.forName("android.view.View", false, classLoader)
+                .getDeclaredMethod("setAlpha", Float::class.javaPrimitiveType)
+            val translationYMethod = Class.forName("android.view.View", false, classLoader)
+                .getDeclaredMethod("setTranslationY", Float::class.javaPrimitiveType)
+            var visibilityHook: XposedInterface.HookHandle? = null
+            var alphaHook: XposedInterface.HookHandle? = null
+            var translationYHook: XposedInterface.HookHandle? = null
+            reconcileControlVisibilityHook = reconcile@{
+                val shouldInstall = isControlHostActivity(gCurrentActivity) &&
+                    (controlEffectsActive() || gMasterOn && gRefreshOff)
+                if (!shouldInstall) {
+                    visibilityHook?.unhook()
+                    alphaHook?.unhook()
+                    translationYHook?.unhook()
+                    visibilityHook = null
+                    alphaHook = null
+                    translationYHook = null
+                    return@reconcile
                 }
-                result
-            }
-            LogUtil.info("  ✓ inflate")
-        } catch (e: Exception) { LogUtil.error("inflate", e) }
-
-        try {
-            val c = Class.forName("android.view.View", false, classLoader)
-            ham(c, "setVisibility", "sv") { chain ->
-                if (gInternalViewMutation.get() == true) return@ham chain.proceed()
+                if (visibilityHook != null && alphaHook != null && translationYHook != null) return@reconcile
+                visibilityHook = module.hook(visibilityMethod)
+                    .setId("guoplusVisibility")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                if (gInternalViewMutation.get() == true || !gMasterOn) return@Hooker chain.proceed()
+                if (!controlEffectsActive() && !gRefreshOff) return@Hooker chain.proceed()
                 val view = chain.thisObject as? View
                 val targetVisibility = chain.getArg(0) as? Int
 
@@ -3895,17 +4021,16 @@ object Hooks {
                     }
                 }
 
-                if (view != null && targetVisibility != null) {
+                if (controlEffectsActive() && view != null && targetVisibility != null) {
                     val desired = controlVisibility.requestedVisibility(view, targetVisibility)
                     if (desired != targetVisibility) {
                         val args = chain.args.toTypedArray()
                         args[0] = desired
-                        return@ham chain.proceed(args)
+                        return@Hooker chain.proceed(args)
                     }
                 }
-                if (!gMasterOn || pauseRestoresControls()) return@ham chain.proceed()
+                if (pauseRestoresControls()) return@Hooker chain.proceed()
                 try {
-                    LogUtil.incr("setVis")
                     if (targetVisibility == View.VISIBLE && view != null) {
                         val replacement = when {
                             gRefreshOff && (synchronized(gKnownRefreshAccessoryViews) { gKnownRefreshAccessoryViews.containsKey(view) } || isRefreshAccessoryContainer(view)) -> {
@@ -3918,34 +4043,45 @@ object Hooks {
                             rememberViewState(view, View.VISIBLE)
                             val args = chain.args.toTypedArray()
                             args[0] = replacement
-                            return@ham chain.proceed(args)
+                            return@Hooker chain.proceed(args)
                         }
                     }
                     chain.proceed()
                 } catch (_: Exception) { chain.proceed() }
+                    })
+                alphaHook = module.hook(alphaMethod)
+                    .setId("guoplusAlpha")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        if (!controlEffectsActive() || gInternalViewMutation.get() == true) return@Hooker chain.proceed()
+                        val view = chain.thisObject as? View
+                        val requested = chain.getArg(0) as? Float
+                        if (view == null || requested == null) chain.proceed()
+                        else {
+                            val desired = controlVisibility.requestedAlpha(view, requested)
+                            if (desired == requested) chain.proceed()
+                            else chain.proceed(chain.args.toTypedArray().also { it[0] = desired })
+                        }
+                    })
+                translationYHook = module.hook(translationYMethod)
+                    .setId("guoplusRowTranslation")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        if (!controlEffectsActive() || gInternalViewMutation.get() == true) return@Hooker chain.proceed()
+                        val view = chain.thisObject as? View
+                        val requested = chain.getArg(0) as? Float
+                        if (view == null || requested == null) chain.proceed()
+                        else {
+                            val desired = controlVisibility.requestedTranslationY(view, requested)
+                            if (desired == requested) chain.proceed()
+                            else chain.proceed(chain.args.toTypedArray().also { it[0] = desired })
+                        }
+                    })
+                LogUtil.info("  ✓ 按需安装控件可见性 Hook")
             }
-            LogUtil.info("  ✓ setVis")
-        } catch (e: Exception) { LogUtil.error("setVis", e) }
-        try {
-            val c = Class.forName("android.view.ViewGroup", false, classLoader)
-            ham(c, "addView", "av") { chain ->
-                val v = try { chain.getArg(0) as? View } catch (_: Throwable) { null }
+        } catch (e: Exception) { LogUtil.error("控件可见性 Hook 初始化失败", e) }
 
-                val result = chain.proceed()
-                try {
-                    if (!gMasterOn) return@ham result
-                    LogUtil.incr("addView")
-                    if (v != null) {
-                        syncCustomControls(v)
-                        if (gRefreshOff && isRefreshAccessoryContainer(v)) hideRefreshAccessory(v)
-                    }
-                } catch (_: Exception) {}
-                result
-            }
-            LogUtil.info("  ✓ addView")
-        } catch (e: Exception) { LogUtil.error("addView", e) }
-
-        try { val c = Class.forName("com.dragon.read.recyler.AbsRecyclerViewHolder", false, classLoader); hac(c, "cc") { chain -> if (gMasterOn) try { val v = chain.getArg(0) as? View; if (v != null) { if (gControlOn) scanTreeQuick(v) else scanTreeRestore(v) } } catch (_: Exception) {}; chain.proceed() }; try { module.hook(c.getDeclaredMethod("onBind", Object::class.java, Int::class.java)).setId("cb").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn) try { val iv = chain.thisObject.javaClass.getField("itemView").get(chain.thisObject) as? View; if (iv != null) { if (gControlOn) scanTreeQuick(iv) else scanTreeRestore(iv) } } catch (_: Exception) {}; chain.proceed() }) } catch (_: Exception) {}; LogUtil.info("  ✓ card") } catch (e: Exception) { LogUtil.warn("  AbsRecyclerViewHolder 未找到") }
+        try { val c = Class.forName("com.dragon.read.recyler.AbsRecyclerViewHolder", false, classLoader); hac(c, "cc") { chain -> if (controlEffectsActive()) try { val v = chain.getArg(0) as? View; if (v != null) controlSyncScheduler.request(v) } catch (_: Exception) {}; chain.proceed() }; try { module.hook(c.getDeclaredMethod("onBind", Object::class.java, Int::class.java)).setId("cb").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (controlEffectsActive()) try { val iv = chain.thisObject.javaClass.getField("itemView").get(chain.thisObject) as? View; if (iv != null) controlSyncScheduler.request(iv) } catch (_: Exception) {}; chain.proceed() }) } catch (_: Exception) {}; LogUtil.info("  ✓ card") } catch (e: Exception) { LogUtil.warn("  AbsRecyclerViewHolder 未找到") }
 
         try {
             val c = Class.forName("android.app.Activity", false, classLoader)
@@ -3953,6 +4089,16 @@ object Hooks {
                 .setId("topSwipe").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                     val act = chain.thisObject as? Activity
                     val ev = chain.getArg(0) as? android.view.MotionEvent
+                    if (gMasterOn && act === gCurrentActivity && ev != null) {
+                        when (ev.actionMasked) {
+                            android.view.MotionEvent.ACTION_DOWN, android.view.MotionEvent.ACTION_MOVE ->
+                                gControlSyncAfter = android.os.SystemClock.uptimeMillis() + 180L
+                            android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                                gControlSyncAfter = android.os.SystemClock.uptimeMillis() + 180L
+                                if (controlEffectsActive()) act?.window?.decorView?.let(controlSyncScheduler::request)
+                            }
+                        }
+                    }
                     if (act != null && ev != null && gMasterOn && gTopZoneOn && act === gCurrentActivity &&
                         act.javaClass.name in setOf("com.dragon.read.pages.main.MainFragmentActivity",
                             "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity",
@@ -3984,6 +4130,7 @@ object Hooks {
                 try {
                     if (a != null) {
 
+                        if (gCurrentActivity !== a) gPlayerPageActive = false
                         gCurrentActivity = a
                         initPrefs(a.applicationContext)
                         appCtx = a.applicationContext
@@ -3993,7 +4140,7 @@ object Hooks {
                 val result = chain.proceed()
                 try {
                     if (a != null) {
-                        if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
+                        syncStatusBar(a)
                         if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
                         createNotification(a)
                     }
@@ -4004,6 +4151,7 @@ object Hooks {
             module.hook(c.getDeclaredMethod("onResume")).setId("or").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 LogUtil.incr("onResume")
                 val a = chain.thisObject as? Activity
+                if (gCurrentActivity !== a) gPlayerPageActive = false
                 gCurrentActivity = a
 
                 scheduleSettingsEntryInjection(a)
@@ -4024,14 +4172,16 @@ object Hooks {
                 val result = chain.proceed()
                 try {
                     if (a != null) {
-                        if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
+                        syncStatusBar(a)
                         if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
                         createNotification(a)
                     }
                 } catch (_: Exception) {}
                 mainHandler.postDelayed({
+                    if (a == null || gCurrentActivity !== a || a.isFinishing) return@postDelayed
+                    reconcileControlVisibilityHook?.invoke()
                     scanAllWindows()
-                    if (gMasterOn && gStatusOn) applyCleanTop(a) else showStatusBar(a)
+                    syncStatusBar(a)
                     if (gMasterOn && gNavBarOff) applyNavBar(a) else showNavBar(a)
                 }, 400)
                 startPeriodicScan()
@@ -4042,6 +4192,7 @@ object Hooks {
             module.hook(c.getDeclaredMethod("onPause")).setId("op").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 val a = chain.thisObject as? Activity
                 stopPeriodicScan()
+                gControlSyncAfter = 0L
                 val result = chain.proceed()
                 mainHandler.postDelayed({
                     try {
@@ -4257,29 +4408,10 @@ object Hooks {
                 }
             }
             } catch (e: Throwable) { LogUtil.warn("果+ 原生抽屉映射不可用，使用菜单兜底: $e") }
-            ham(viewClass, "setAlpha", "guoplusAlpha") { chain ->
-                val view = chain.thisObject as? View
-                val requested = chain.getArg(0) as? Float
-                if (view == null || requested == null || gInternalViewMutation.get() == true) chain.proceed()
-                else {
-                    val args = chain.args.toTypedArray()
-                    args[0] = controlVisibility.requestedAlpha(view, requested)
-                    chain.proceed(args)
-                }
-            }
-            ham(viewClass, "setTranslationY", "guoplusRowTranslation") { chain ->
-                val view = chain.thisObject as? View
-                val requested = chain.getArg(0) as? Float
-                if (view == null || requested == null || gInternalViewMutation.get() == true) chain.proceed()
-                else {
-                    val args = chain.args.toTypedArray()
-                    args[0] = controlVisibility.requestedTranslationY(view, requested)
-                    chain.proceed(args)
-                }
-            }
             val dialogClass = Class.forName("android.app.Dialog", false, classLoader)
             ham(dialogClass, "show", "guoplusDrawer") { chain ->
                 val result = chain.proceed()
+                if (!gMasterOn || !featureEnabled("drawer")) return@ham result
                 val dialog = chain.thisObject as? Dialog
                 if (dialog != null && !nativePlaybackDrawer.isPrepared(dialog)) {
                     if (dialog.isShowing && shortVideoHolderSnapshot().any { isShortVideoHolderVisible(it.first) }) {
@@ -4294,6 +4426,7 @@ object Hooks {
             for (method in listOf("showAtLocation", "showAsDropDown")) {
                 ham(popupClass, method, "guoplusPopup_$method") { chain ->
                     val result = chain.proceed()
+                    if (!gMasterOn || !featureEnabled("drawer")) return@ham result
                     val popup = chain.thisObject as? PopupWindow
                     if (popup != null) {
                         if (popup.isShowing && shortVideoHolderSnapshot().any { isShortVideoHolderVisible(it.first) }) {

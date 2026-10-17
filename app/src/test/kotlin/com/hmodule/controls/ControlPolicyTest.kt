@@ -67,6 +67,7 @@ class ControlPolicyTest {
         assertFalse(exited.hides(ControlTarget.PLAYER_MORE))
         assertTrue(clear.copy(hideEnabled = false).clearsAll)
         assertTrue(ControlTarget.entries.all(clear.copy(hideEnabled = false)::hides))
+        assertTrue(clear.copy(keepDanmaku = false).hides(ControlTarget.DANMAKU_ENTRY))
         assertFalse(clear.copy(masterEnabled = false).clearsAll)
     }
 

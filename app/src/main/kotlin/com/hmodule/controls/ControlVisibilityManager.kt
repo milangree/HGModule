@@ -1,10 +1,7 @@
 package com.hmodule.controls
 
 import android.graphics.Rect
-import android.graphics.Color
 import android.graphics.drawable.Drawable
-import android.graphics.drawable.ColorDrawable
-import android.os.Build
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -26,7 +23,6 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
 
     private data class ParentState(var visibility: Int, var alpha: Float, val x: Float, val y: Float)
     private data class BackdropState(val background: Drawable?, var visibility: Int, var alpha: Float)
-    private data class WindowState(val color: Int, val contrast: Boolean)
     private data class RowShift(var nativeY: Float, var offset: Float)
 
     private val controls = WeakHashMap<View, State>()
@@ -36,10 +32,11 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
     private val tabLayouts = WeakHashMap<View, ViewGroup.LayoutParams>()
     private val pauseParents = WeakHashMap<View, ParentState>()
     private val backdrops = WeakHashMap<View, BackdropState>()
-    private val windows = WeakHashMap<Window, WindowState>()
     private val rowShifts = WeakHashMap<View, RowShift>()
     private val infoHosts = WeakHashMap<View, Int>()
     private val layoutWatched = WeakHashMap<View, Boolean>()
+    private val resourceNames = WeakHashMap<View, Pair<Int, String>>()
+    private val unsupportedBottomLayouts = mutableSetOf<String>()
     private val interactionLayoutListener = View.OnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
         val host = if (view is ViewGroup && isInteractionGroup(view)) view else view.parent as? ViewGroup
         if (host != null) {
@@ -57,6 +54,7 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
     var clearHostNames: Set<String> = emptySet()
     var bottomBackdropName: String = ""
     private var applying = false
+    private var lastKeepDanmaku: Boolean? = null
 
     fun bind(view: View, target: ControlTarget) {
         if (view in controls) return
@@ -73,7 +71,10 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
         if (applying) return
         applying = true
         try {
-            if (!policy.clearsAll) { restoreClearHosts(); restoreBackdrops() }
+            if (!policy.clearsAll || lastKeepDanmaku != policy.keepDanmaku) {
+                restoreClearHosts(); restoreBackdrops()
+            }
+            lastKeepDanmaku = policy.keepDanmaku
             discover(root)
             syncOpacityHosts(root)
             syncInteractionHosts(root)
@@ -86,6 +87,8 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
                 }
             }
             syncInfoHosts(root)
+            reflowInfoGroups(root)
+            normalizeSeriesBanners(root)
             reflowInteractions(root)
             reflowBottomTabs(root)
             if (policy.clearsAll) hideClearHosts(root)
@@ -147,7 +150,6 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
             restorePauseParents()
             restoreClearHosts()
             restoreBackdrops()
-            restoreWindows()
             restoreOpacityHosts()
             for ((view, visibility) in interactionHosts.entries.toList()) mutate { view.visibility = visibility }
             interactionHosts.clear()
@@ -157,7 +159,7 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
         } finally { applying = false }
     }
 
-    fun clear() { restoreAll(); controls.clear(); seen.clear() }
+    fun clear() { restoreAll(); controls.clear(); seen.clear(); resourceNames.clear(); unsupportedBottomLayouts.clear() }
 
     private fun nativeVisibility(view: View): Int = controls[view]?.nativeVisibility ?: infoHosts[view] ?:
         clearHosts[view] ?: interactionHosts[view] ?: view.visibility
@@ -315,6 +317,80 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
         infoHosts.clear()
     }
 
+    /**
+     * Some player information containers use absolute/constraint positioning instead of
+     * a measuring parent that reacts to GONE. Keep the declaration slot measurable and
+     * move the content above it into that released visual space.
+     */
+    private fun reflowInfoGroups(root: View) {
+        val parents = controls.entries.filter {
+            it.value.target in INFO_TARGETS && inside(it.key, root)
+        }.mapNotNull { it.key.parent as? ViewGroup }.distinct()
+        for (host in parents) {
+            if (host === root || host.javaClass.name.contains("Recycler") ||
+                host.javaClass.name.contains("Pager") || containsVideoSurface(host)) continue
+            val children = (0 until host.childCount).map(host::getChildAt)
+            val hidden = children.filter { child ->
+                controls[child]?.let { state -> state.target in INFO_TARGETS && policy.hides(state.target) } == true &&
+                    nativeVisibility(child) == View.VISIBLE && child.height > 0
+            }
+            if (hidden.isEmpty()) {
+                restoreRowShifts(host)
+                continue
+            }
+            val offsets = mutableMapOf<View, Float>()
+            for (child in children) {
+                if (child in hidden || nativeVisibility(child) != View.VISIBLE || child.height <= 0) continue
+                // Only release rows below this child. A watching-count badge can
+                // share the same baseline with its series title; moving horizontal
+                // siblings down clips their text outside the rounded background.
+                val released = hidden.filter { it.top + originalTranslationY(it) >= child.bottom + originalTranslationY(child) - 0.5f }
+                    .fold(0f) { total, item -> total + item.height.toFloat() }
+                if (released > 0f && child.bottom + originalTranslationY(child) <=
+                    hidden.maxOf { it.bottom + originalTranslationY(it) } + 1f) {
+                    offsets[child] = released
+                }
+            }
+            var changed = false
+            for (child in children) {
+                val original = originalTranslationY(child)
+                val offset = offsets[child] ?: 0f
+                val desired = original + offset
+                if (offset == 0f) {
+                    changed = changed || rowShifts.containsKey(child) || child.translationY != original
+                    rowShifts.remove(child)
+                    mutate { if (child.translationY != original) child.translationY = original }
+                } else {
+                    changed = changed || rowShifts[child]?.offset != offset || child.translationY != desired
+                    rowShifts[child] = RowShift(original, offset)
+                    mutate { if (child.translationY != desired) child.translationY = desired }
+                }
+            }
+            if (changed) host.requestLayout()
+        }
+    }
+
+    /** Clamp stale header translations so the series strip cannot overlap title rows. */
+    private fun normalizeSeriesBanners(root: View) {
+        if (policy.hides(ControlTarget.SERIES_BANNER)) return
+        val banners = controls.entries.filter {
+            it.value.target == ControlTarget.SERIES_BANNER && inside(it.key, root) &&
+                it.key.visibility == View.VISIBLE
+        }.map { it.key }
+        fun walk(parent: ViewGroup) {
+            for (index in 0 until parent.childCount) {
+                val child = parent.getChildAt(index)
+                val translatedTop = child.top + child.translationY
+                val translatedBottom = child.bottom + child.translationY
+                if ((translatedTop < 0f || translatedBottom > parent.height.toFloat()) && child.translationY != 0f) {
+                    mutate { child.translationY = 0f }
+                }
+                if (child is ViewGroup) walk(child)
+            }
+        }
+        banners.forEach { banner -> if (banner is ViewGroup) walk(banner) }
+    }
+
     /** The native layout counts VISIBLE children, including inside its super measurement. */
     fun withInteractionMeasurement(host: ViewGroup, measure: () -> Any?): Any? {
         val slots = (0 until host.childCount).map(host::getChildAt).filter {
@@ -329,21 +405,9 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
         }
     }
 
-    fun syncWindow(window: Window) {
-        if (!policy.clearsAll) { restoreWindows(); return }
-        windows.getOrPut(window) {
-            WindowState(window.navigationBarColor, Build.VERSION.SDK_INT >= 29 && window.isNavigationBarContrastEnforced)
-        }
-        window.navigationBarColor = CLEAR_BACKGROUND_COLOR
-        if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
-    }
-
-    private fun restoreWindows() {
-        for ((window, state) in windows.entries.toList()) {
-            window.navigationBarColor = state.color
-            if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = state.contrast
-        }
-        windows.clear()
+    fun syncWindow(@Suppress("UNUSED_PARAMETER") window: Window) {
+        // Keep the host's own bottom-bar/navigation color. The player may use different
+        // letterbox colors for different videos; forcing one module color creates a seam.
     }
 
     private fun restoreBackdrops() {
@@ -389,17 +453,69 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
 
     private fun hideClearHosts(view: View) {
         if (view.tag == MODULE_UI_TAG) return
+        if (isDanmakuRenderer(view)) {
+            if (!policy.keepDanmaku) {
+                if (view !in clearHosts) clearHosts[view] = view.visibility
+                if (view.visibility != View.INVISIBLE) mutate { view.visibility = View.INVISIBLE }
+            }
+            return
+        }
         if (entryName(view) == "bottom_tab_mask" || bottomBackdropName.isNotBlank() && entryName(view) == bottomBackdropName || profileId == "CN-7.3.2.32" && entryName(view) == "ar8") {
             backdrops.getOrPut(view) { BackdropState(view.background, view.visibility, view.alpha) }
-            mutate { view.background = ColorDrawable(CLEAR_BACKGROUND_COLOR); view.visibility = View.VISIBLE; view.alpha = 1f }
+            mutate { view.visibility = View.VISIBLE; view.alpha = 1f }
             return
         }
         if (isPlaybackOverlay(view) && !containsVideoSurface(view)) {
+            // Keep only the renderer branch; the publish button remains a hidden control.
+            if (policy.keepDanmaku && containsPreservedDanmaku(view)) {
+                if (view is ViewGroup) for (i in 0 until view.childCount) {
+                    val child = view.getChildAt(i)
+                    when {
+                        child.tag == MODULE_UI_TAG || containsVideoSurface(child) -> Unit
+                        child.visibility == View.GONE -> Unit
+                        isDanmakuRenderer(child) -> Unit
+                        containsPreservedDanmaku(child) -> hideAllExceptDanmaku(child)
+                        else -> {
+                            if (child !in clearHosts) clearHosts[child] = child.visibility
+                            mutate { child.visibility = View.INVISIBLE }
+                        }
+                    }
+                }
+                return
+            }
             if (view !in clearHosts) clearHosts[view] = view.visibility
             mutate { view.visibility = View.INVISIBLE }
             return
         }
         if (view is ViewGroup) for (i in 0 until view.childCount) hideClearHosts(view.getChildAt(i))
+    }
+
+    private fun containsPreservedDanmaku(view: View, depth: Int = 0): Boolean {
+        if (depth > 10) return false
+        if (isDanmakuRenderer(view)) return true
+        return view is ViewGroup && (0 until view.childCount).any {
+            containsPreservedDanmaku(view.getChildAt(it), depth + 1)
+        }
+    }
+
+    private fun hideAllExceptDanmaku(view: View) {
+        if (isDanmakuRenderer(view) || view.tag == MODULE_UI_TAG || containsVideoSurface(view)) return
+        if (view is ViewGroup && containsPreservedDanmaku(view)) {
+            for (index in 0 until view.childCount) {
+                val child = view.getChildAt(index)
+                if (containsPreservedDanmaku(child)) hideAllExceptDanmaku(child)
+                else if (child.tag != MODULE_UI_TAG && child.visibility != View.GONE && !containsVideoSurface(child)) {
+                    if (child !in clearHosts) clearHosts[child] = child.visibility
+                    mutate { child.visibility = View.INVISIBLE }
+                }
+            }
+        }
+    }
+
+    private fun isDanmakuRenderer(view: View): Boolean {
+        val className = view.javaClass.name
+        return className.endsWith(".DanmakuView") || className.endsWith(".BarrageView") ||
+            className.endsWith(".DanmakuSurfaceView")
     }
 
     private fun isPlaybackOverlay(view: View): Boolean {
@@ -416,7 +532,8 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
             if (view.tag == MODULE_UI_TAG) return
             if (view !in backdrops && (bottomBackdropName.isBlank() || entryName(view) != bottomBackdropName) && entryName(view) !in setOf("ar8", "bottom_tab_mask") && isPlaybackOverlay(view) && !containsVideoSurface(view)) {
                 val original = opacityHosts.getOrPut(view) { controls[view]?.nativeAlpha ?: view.alpha }
-                mutate { view.alpha = policy.alpha(original) }
+                val desired = policy.alpha(original)
+                if (view.alpha != desired) mutate { view.alpha = desired }
                 return
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) walk(view.getChildAt(i))
@@ -462,13 +579,16 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
         }
         for (view in hidden) {
             if (view !in interactionHosts) interactionHosts[view] = view.visibility
-            mutate { view.visibility = View.INVISIBLE }
+            if (view.visibility != View.INVISIBLE) mutate { view.visibility = View.INVISIBLE }
         }
     }
 
     private fun hiddenVisibility(target: ControlTarget): Int = when (target) {
+        // Keep the top row's measured height so the search/menu anchors do not jump upward.
+        ControlTarget.TOP_TABS -> View.INVISIBLE
         // CN's LimitHeightByChildrenConstraintLayout cannot recover after all children
         // are GONE (it measures a zero width and an invalid height). Retain their slots.
+        ControlTarget.AUTHOR_DECLARATION,
         ControlTarget.AUTHOR_FOLLOW, ControlTarget.FAVORITE, ControlTarget.COMMENT, ControlTarget.LIKE, ControlTarget.SHARE -> View.INVISIBLE
         else -> View.GONE
     }
@@ -530,6 +650,9 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
     }
 
     private fun identify(view: View): ControlTarget? {
+        if (view.javaClass.name in COIN_REWARD_CLASSES) return ControlTarget.COIN_REWARD
+        if (view.javaClass.name == SERIES_BANNER_CLASS && insideSeriesInfoHeader(view))
+            return ControlTarget.SERIES_BANNER
         // This Compose host owns the avatar and follow badge. The same component is
         // also used outside playback, so only bind it under the native right panel.
         if (view.javaClass.name in AUTHOR_FOLLOW_CLASSES && insidePlayerRightPanel(view))
@@ -561,6 +684,7 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
         }
         resourceTargets[name]?.let { return it }
         val text = ((view as? TextView)?.text?.toString() ?: view.contentDescription?.toString().orEmpty()).trim()
+        if (text.contains("领金币") || text.contains("领取金币")) return ControlTarget.COIN_REWARD
         if (text.isEmpty()) return null
         // Counts can be filled after their containing information panel is already hidden.
         if (WATCHING_COUNT_TEXT.matches(text)) return ControlTarget.WATCHING_COUNT
@@ -572,6 +696,9 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
             "我的" -> ControlTarget.PROFILE
             else -> null
         }
+        val positionCandidate = text in TOP_TAB_LABELS || text in POSITION_LABELS ||
+            INTERACTION_LABEL_PREFIXES.any { text.startsWith(it) }
+        if (!positionCandidate) return null
         val rect = Rect()
         if (!view.getGlobalVisibleRect(rect)) return null
         val dm = view.resources.displayMetrics
@@ -619,6 +746,16 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
         return false
     }
 
+    private fun insideSeriesInfoHeader(view: View): Boolean {
+        var parent = view.parent as? View
+        repeat(12) {
+            val node = parent ?: return false
+            if (node.javaClass.name == SERIES_HEADER_CLASS) return true
+            parent = node.parent as? View
+        }
+        return false
+    }
+
     private fun insideBottomNav(view: View): Boolean {
         var node: View? = view
         repeat(8) {
@@ -661,26 +798,35 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
             val visible = tabs.filter { it.visibility != View.GONE }
             if (visible.isEmpty()) continue
             val available = parent.width - parent.paddingLeft - parent.paddingRight
+            var changed = false
             for ((index, tab) in visible.withIndex()) {
                 if (tab !in tabLayouts) copyLayout(tab.layoutParams)?.let { tabLayouts[tab] = it }
                 mutate {
                     when (val lp = tab.layoutParams) {
                         is LinearLayout.LayoutParams -> {
-                            lp.width = 0; lp.weight = 1f; lp.leftMargin = 0; lp.rightMargin = 0
-                            tab.layoutParams = lp
+                            if (lp.width != 0 || lp.weight != 1f || lp.leftMargin != 0 || lp.rightMargin != 0) {
+                                lp.width = 0; lp.weight = 1f; lp.leftMargin = 0; lp.rightMargin = 0
+                                tab.layoutParams = lp
+                                changed = true
+                            }
                         }
                         is FrameLayout.LayoutParams -> if (available > 0) {
                             val start = available * index / visible.size
-                            lp.width = available * (index + 1) / visible.size - start
-                            lp.gravity = Gravity.TOP or Gravity.START
-                            lp.marginStart = start; lp.marginEnd = 0
-                            tab.layoutParams = lp
+                            val width = available * (index + 1) / visible.size - start
+                            val gravity = Gravity.TOP or Gravity.START
+                            if (lp.width != width || lp.gravity != gravity || lp.marginStart != start || lp.marginEnd != 0) {
+                                lp.width = width
+                                lp.gravity = gravity
+                                lp.marginStart = start; lp.marginEnd = 0
+                                tab.layoutParams = lp
+                                changed = true
+                            }
                         }
-                        else -> LogUtil.incr("controlBottomUnsupportedLayout")
+                        else -> if (unsupportedBottomLayouts.add(tab.javaClass.name)) LogUtil.incr("controlBottomUnsupportedLayout")
                     }
                 }
             }
-            parent.requestLayout()
+            if (changed) parent.requestLayout()
         }
     }
 
@@ -695,9 +841,15 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
         return false
     }
 
-    private fun entryName(view: View): String = try {
-        if (view.id > 0) view.resources.getResourceEntryName(view.id) else ""
-    } catch (_: Throwable) { "" }
+    private fun entryName(view: View): String {
+        val id = view.id
+        resourceNames[view]?.let { if (it.first == id) return it.second }
+        val name = try {
+            if (id > 0) view.resources.getResourceEntryName(id) else ""
+        } catch (_: Throwable) { "" }
+        resourceNames[view] = id to name
+        return name
+    }
 
     private fun copyLayout(lp: ViewGroup.LayoutParams?): ViewGroup.LayoutParams? {
         if (lp == null) return null
@@ -709,15 +861,23 @@ class ControlVisibilityManager(private val mutate: (() -> Unit) -> Unit) {
     }
 
     companion object {
-        val CLEAR_BACKGROUND_COLOR: Int = Color.rgb(0x1C, 0x1A, 0x17)
         const val MODULE_UI_TAG = "GUOPLUS_MODULE_UI"
         private val NAV_LABELS = setOf("首页", "剧场", "商城", "赚钱", "我的", "短剧", "福利")
         private val TOP_TAB_LABELS = setOf("推荐", "关注", "精选", "短剧", "漫剧", "真人剧", "剧场")
+        private val POSITION_LABELS = setOf("搜索", "菜单", "更多", "收藏", "评论", "点赞", "分享", "全屏观看", "全屏播放", "热评")
+        private val INTERACTION_LABEL_PREFIXES = listOf("收藏，", "收藏,", "评论，", "评论,", "点赞，", "点赞,", "分享，", "分享,")
         private val WATCHING_COUNT_TEXT = Regex("共\\s*[\\d.,]+\\s*[万亿]?\\s*人在追")
         private val INTERACTION_TARGETS = setOf(ControlTarget.AUTHOR_FOLLOW, ControlTarget.FAVORITE, ControlTarget.COMMENT, ControlTarget.LIKE, ControlTarget.SHARE)
         private val AUTHOR_FOLLOW_CLASSES = setOf("com.dragon.read.compose.AvatarComposeComponent",
             "com.dragon.read.component.shortvideo.impl.rightview.PugcSubscribeView")
-        private val INFO_TARGETS = setOf(ControlTarget.SERIES_INFO, ControlTarget.AUTHOR_DECLARATION, ControlTarget.HOT_COMMENT, ControlTarget.WATCHING_COUNT)
+        private val COIN_REWARD_CLASSES = setOf("com.dragon.read.goldcoinbox.widget.c",
+            "com.dragon.read.polaris.novelug.pendant.a",
+            // 7.3.9.x uses a Compose pendant host outside the player right panel.
+            "com.bytedance.ug.sdk.kmp.novel.pendant.w")
+        private const val SERIES_BANNER_CLASS = "com.dragon.read.component.shortvideo.impl.infoheader.WrapWidthLinearLayout"
+        private const val SERIES_HEADER_CLASS = "com.dragon.read.component.shortvideo.impl.infoheader.ShortSeriesInfoHeaderView"
+        private val INFO_TARGETS = setOf(ControlTarget.SERIES_BANNER, ControlTarget.SERIES_INFO,
+            ControlTarget.AUTHOR_DECLARATION, ControlTarget.HOT_COMMENT, ControlTarget.WATCHING_COUNT)
         // Confirmed against the installed CN 7.3.2.32 APK and live player trees.
         private val CN_73232_TARGETS = mapOf(
             "hqm" to ControlTarget.TOP_TABS,

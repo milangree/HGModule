@@ -16,10 +16,11 @@ import org.robolectric.annotation.Config
 import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [34], shadows = [FileRenameShadow::class])
 class AdaptationTest {
     private val app get() = RuntimeEnvironment.getApplication()
-    private fun raw() = app.assets.open("adaptation/gp-7.3.9.32-h002.json").bufferedReader().use { it.readText() }
+    private fun raw() = app.assets.open("adaptation/gp-7.3.9.32-h003.json").bufferedReader().use { it.readText() }
+    private val baseRevision get() = ProfileJson.parse(raw()).revision
     private fun revised(revision: Int) = JSONObject(raw()).put("revision", revision).toString()
     private fun mapping(root: JSONObject, key: String): JSONObject = root.getJSONArray("features").let { features ->
         (0 until features.length()).map { features.getJSONObject(it).getJSONObject("mappings") }.single { it.has(key) }
@@ -43,7 +44,7 @@ class AdaptationTest {
     }
 
     @Test fun malformedImportKeepsPreviousValidCacheAndUserSettings() {
-        val imported = AdaptationStore.importJson(revised(3))
+        val imported = AdaptationStore.importJson(revised(baseRevision + 1))
         val user = ModuleConfig.local(app)
         user.edit().putInt("guoplus_control_opacity", 50).commit()
         for (json in listOf(
@@ -66,10 +67,10 @@ class AdaptationTest {
     }
 
     @Test fun importSurvivesRestartAndClearOfUserSettings() {
-        AdaptationStore.importJson(revised(3))
+        AdaptationStore.importJson(revised(baseRevision + 1))
         AdaptationStore.loadAssets(app)
         ModuleConfig.clear(app, ModuleConfig.local(app))
-        assertEquals(3, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
+        assertEquals(baseRevision + 1, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
         assertThrows(IllegalArgumentException::class.java) { AdaptationStore.importJson(raw()) }
     }
 
@@ -77,21 +78,21 @@ class AdaptationTest {
         val framework = app.getSharedPreferences("adaptation-framework-test", 0)
         framework.edit().clear().commit()
         AdaptationStore.publishTo(framework)
-        AdaptationStore.importJson(revised(3))
-        assertTrue(framework.all.values.any { it is String && JSONObject(it).getInt("revision") == 3 })
+        AdaptationStore.importJson(revised(baseRevision + 1))
+        assertTrue(framework.all.values.any { it is String && JSONObject(it).getInt("revision") == baseRevision + 1 })
         app.getSharedPreferences(AdaptationStore.REMOTE_GROUP, 0).edit().clear().commit()
         AdaptationStore.loadAssets(app)
-        assertEquals(2, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
+        assertEquals(baseRevision, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
         AdaptationStore.loadSnapshot(framework)
-        assertEquals(3, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
+        assertEquals(baseRevision + 1, AdaptationStore.exact(TargetNames.CN_PACKAGE, "7.3.9.32", 73932)!!.revision)
     }
 
     @Test fun badHostCacheRecoversAndRevisionRefreshesWithoutCrossVersionReuse() {
         val dir = cache()
         val file = File(dir, "${TargetNames.CN_PACKAGE}-73932.json")
         file.writeText("broken")
-        assertEquals(2, AdaptationStore.select(TargetNames.CN_PACKAGE, "7.3.9.32", 73932, dir)!!.revision)
-        assertEquals(2, ProfileJson.parse(file.readText()).revision)
+        assertEquals(baseRevision, AdaptationStore.select(TargetNames.CN_PACKAGE, "7.3.9.32", 73932, dir)!!.revision)
+        assertEquals(baseRevision, ProfileJson.parse(file.readText()).revision)
         AdaptationStore.importJson(revised(4))
         assertEquals(4, AdaptationStore.select(TargetNames.CN_PACKAGE, "7.3.9.32", 73932, dir)!!.revision)
         assertEquals(4, ProfileJson.parse(file.readText()).revision)

@@ -10,9 +10,9 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [34], shadows = [FileRenameShadow::class])
 class ProfileV2Test {
-    private fun raw() = RuntimeEnvironment.getApplication().assets.open("adaptation/gp-7.3.9.32-h002.json").bufferedReader().use { it.readText() }
+    private fun raw() = RuntimeEnvironment.getApplication().assets.open("adaptation/gp-7.3.9.32-h003.json").bufferedReader().use { it.readText() }
     private fun feature(root: JSONObject, id: String) = root.getJSONArray("features").let { array ->
         (0 until array.length()).map { array.getJSONObject(it) }.single { it.getString("id") == id }
     }
@@ -78,7 +78,7 @@ class ProfileV2Test {
     }
 
     @Test fun allBuiltinSignaturesAgreeWithModuleBindingsAndCurrentContract() {
-        for (file in listOf("gp-7.3.2.32-h002.json","gp-7.3.9.32-h002.json")) {
+        for (file in listOf("gp-7.3.2.32-h002.json","gp-7.3.9.32-h003.json")) {
             val profile=ProfileJson.parse(RuntimeEnvironment.getApplication().assets.open("adaptation/$file").bufferedReader().use { it.readText() })
             for (f in profile.features.filter { it.outcome=="PASS" }) {
                 val expected=FeatureContracts.expected(f.id,profile.names)
@@ -120,7 +120,7 @@ class ProfileV2Test {
         val dir=java.io.File(app.cacheDir,"v2-migration").apply { mkdirs() }
         java.io.File(dir,"com.phoenix.read-73932.json").writeText(old)
         val selected=AdaptationStore.select("com.phoenix.read","7.3.9.32",73932,dir)!!
-        assertEquals(2,selected.schemaVersion); assertEquals(2,selected.revision)
+        assertEquals(2,selected.schemaVersion); assertEquals(ProfileJson.parse(raw()).revision,selected.revision)
         assertEquals(2,ProfileJson.parse(java.io.File(dir,"com.phoenix.read-73932.json").readText()).schemaVersion)
     }
 

@@ -132,13 +132,13 @@ class ControlVisibilityManagerTest {
             val policy = ControlPolicy(masterEnabled = true, hideEnabled = true, selected = setOf(ControlTarget.AUTHOR_DECLARATION))
             manager.policy = policy
             manager.sync(root)
-            assertEquals(profile, View.GONE, declaration.visibility)
+            assertEquals(profile, View.INVISIBLE, declaration.visibility)
             assertFalse(profile, icon.isShown)
             assertFalse(profile, text.isShown)
             assertEquals(View.VISIBLE, title.visibility)
             manager.policy = policy.copy(fullClearEnabled = true, restoreOnPause = true, paused = true)
             manager.sync(root)
-            assertEquals(profile, View.GONE, declaration.visibility)
+            assertEquals(profile, View.INVISIBLE, declaration.visibility)
             manager.policy = policy.copy(hideEnabled = false)
             manager.sync(root)
             assertEquals(View.VISIBLE, declaration.visibility)
@@ -188,7 +188,7 @@ class ControlVisibilityManagerTest {
         manager.sync(root)
         assertEquals(View.INVISIBLE, host.visibility)
         assertEquals(View.VISIBLE, backdrop.visibility)
-        assertEquals(ControlVisibilityManager.CLEAR_BACKGROUND_COLOR, (backdrop.background as android.graphics.drawable.ColorDrawable).color)
+        assertNull(backdrop.background)
         manager.policy = manager.policy.copy(fullClearEnabled = false)
         manager.sync(root)
         assertEquals(View.VISIBLE, host.visibility)
@@ -286,6 +286,32 @@ class ControlVisibilityManagerTest {
         assertEquals(View.VISIBLE, hotWrapper.visibility)
         assertEquals(View.INVISIBLE, invisibleAlternative.visibility)
         assertEquals(nativeTitleTop, stack.y + title.y, 0f)
+    }
+
+    @Test fun hidingAuthorDeclarationMovesEarlierInformationDownWithoutAccumulatingAndRestores() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val root = FrameLayout(activity)
+        val host = FrameLayout(activity)
+        val title = View(activity)
+        val declaration = View(activity)
+        root.addView(host); host.addView(title); host.addView(declaration)
+        root.layout(0, 0, 300, 400)
+        host.layout(0, 0, 300, 300)
+        title.layout(0, 180, 300, 220)
+        declaration.layout(0, 220, 300, 250)
+        val manager = ControlVisibilityManager { it() }
+        manager.bind(title, ControlTarget.SERIES_INFO)
+        manager.bind(declaration, ControlTarget.AUTHOR_DECLARATION)
+        manager.policy = ControlPolicy(true, true, setOf(ControlTarget.AUTHOR_DECLARATION))
+        manager.sync(root)
+        assertEquals(View.INVISIBLE, declaration.visibility)
+        assertEquals(30f, title.translationY, 0f)
+        manager.sync(root)
+        assertEquals(30f, title.translationY, 0f)
+        manager.policy = manager.policy.copy(hideEnabled = false)
+        manager.sync(root)
+        assertEquals(View.VISIBLE, declaration.visibility)
+        assertEquals(0f, title.translationY, 0f)
     }
 
     @Test fun interactionPackingKeepsUnequalNativeGapsAndFillsMiddleSlots() {
@@ -424,8 +450,8 @@ class ControlVisibilityManagerTest {
         manager.sync(root)
         manager.syncWindow(activity.window)
         assertEquals(View.VISIBLE, backdrop.visibility)
-        assertEquals(ControlVisibilityManager.CLEAR_BACKGROUND_COLOR, (backdrop.background as android.graphics.drawable.ColorDrawable).color)
-        assertEquals(ControlVisibilityManager.CLEAR_BACKGROUND_COLOR, activity.window.navigationBarColor)
+        assertEquals(android.graphics.Color.DKGRAY, (backdrop.background as android.graphics.drawable.ColorDrawable).color)
+        assertEquals(android.graphics.Color.DKGRAY, activity.window.navigationBarColor)
         assertEquals(View.INVISIBLE, nav.visibility)
         assertEquals(View.VISIBLE, video.visibility)
         manager.policy = active.copy(paused = true)
@@ -628,6 +654,111 @@ class ControlVisibilityManagerTest {
         manager.policy = manager.policy.copy(paused = false)
         manager.sync(root)
         assertEquals(View.INVISIBLE, overlay.visibility)
+    }
+
+    @Test fun fullClearKeepsOnlyDanmakuBranchesByDefaultAndCanHideThemExplicitly() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val root = FrameLayout(activity)
+        val overlay = com.dragon.read.widget.BottomTabFrameLayout(activity)
+        val controlsHost = FrameLayout(activity)
+        val danmaku = com.ixigua.common.meteor.view.DanmakuView(activity)
+        val input = TextView(activity).apply { text = "发弹幕" }
+        val other = View(activity)
+        root.addView(overlay); overlay.addView(controlsHost)
+        controlsHost.addView(danmaku); controlsHost.addView(other); controlsHost.addView(input)
+        val manager = ControlVisibilityManager { it() }
+        manager.bind(input, ControlTarget.DANMAKU_ENTRY)
+        manager.policy = ControlPolicy(masterEnabled = true, fullClearEnabled = true)
+        manager.sync(root)
+        assertEquals(View.VISIBLE, overlay.visibility)
+        assertEquals(View.VISIBLE, controlsHost.visibility)
+        assertEquals(View.VISIBLE, danmaku.visibility)
+        assertEquals(View.GONE, input.visibility)
+        assertEquals(View.INVISIBLE, other.visibility)
+        manager.policy = manager.policy.copy(keepDanmaku = false)
+        manager.sync(root)
+        assertEquals(View.INVISIBLE, overlay.visibility)
+        manager.policy = manager.policy.copy(keepDanmaku = true)
+        manager.sync(root)
+        assertEquals(View.VISIBLE, overlay.visibility)
+        assertEquals(View.VISIBLE, danmaku.visibility)
+        assertEquals(View.GONE, input.visibility)
+        manager.policy = manager.policy.copy(fullClearEnabled = false)
+        manager.sync(root)
+        assertEquals(View.VISIBLE, overlay.visibility)
+        assertEquals(View.VISIBLE, other.visibility)
+    }
+
+    @Test fun cleanScreenCanHideTheStandaloneDanmakuRendererWithoutKeepingItsPublishButton() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val root = FrameLayout(activity)
+        val renderer = com.ixigua.common.meteor.view.DanmakuView(activity)
+        val input = TextView(activity).apply { text = "发弹幕" }
+        root.addView(renderer); root.addView(input)
+        val manager = ControlVisibilityManager { it() }
+        manager.bind(input, ControlTarget.DANMAKU_ENTRY)
+        manager.policy = ControlPolicy(masterEnabled = true, fullClearEnabled = true)
+        manager.sync(root)
+        assertEquals(View.VISIBLE, renderer.visibility)
+        assertEquals(View.GONE, input.visibility)
+        manager.policy = manager.policy.copy(keepDanmaku = false)
+        manager.sync(root)
+        assertEquals(View.INVISIBLE, renderer.visibility)
+        assertEquals(View.GONE, input.visibility)
+        manager.policy = manager.policy.copy(keepDanmaku = true)
+        manager.sync(root)
+        assertEquals(View.VISIBLE, renderer.visibility)
+        manager.policy = manager.policy.copy(fullClearEnabled = false)
+        manager.sync(root)
+        assertEquals(View.VISIBLE, input.visibility)
+    }
+
+    @Test fun goldCoinFloatingContainerIsDiscoveredHiddenAndRestored() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val root = FrameLayout(activity)
+        val coin = com.dragon.read.goldcoinbox.widget.c(activity)
+        root.addView(coin)
+        val manager = ControlVisibilityManager { it() }
+        manager.policy = ControlPolicy(true, true, setOf(ControlTarget.COIN_REWARD))
+        manager.sync(root)
+        assertEquals(View.GONE, coin.visibility)
+        manager.policy = manager.policy.copy(hideEnabled = false)
+        manager.sync(root)
+        assertEquals(View.VISIBLE, coin.visibility)
+    }
+
+    @Test fun composeRewardPendantHidesTheWholeAnimationHostAndRestoresAcrossPlaybackPages() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val root = FrameLayout(activity)
+        val video = android.view.SurfaceView(activity)
+        val coin = com.bytedance.ug.sdk.kmp.novel.pendant.w(activity)
+        val compose = FrameLayout(activity)
+        val animation = View(activity)
+        coin.addView(compose); compose.addView(animation)
+        root.addView(video); root.addView(coin); activity.setContentView(root)
+        val manager = ControlVisibilityManager { it() }
+        manager.policy = ControlPolicy(true, true, setOf(ControlTarget.COIN_REWARD))
+
+        manager.sync(root)
+        assertEquals(View.GONE, coin.visibility)
+        assertFalse(animation.isShown)
+        assertEquals(View.VISIBLE, video.visibility)
+        coin.visibility = manager.requestedVisibility(coin, View.VISIBLE)
+        assertEquals(View.GONE, coin.visibility)
+
+        manager.policy = manager.policy.copy(hideEnabled = false)
+        manager.sync(root)
+        assertEquals(View.VISIBLE, coin.visibility)
+        assertTrue(animation.isShown)
+        val next = com.bytedance.ug.sdk.kmp.novel.pendant.w(activity)
+        root.removeView(coin); root.addView(next)
+        manager.policy = manager.policy.copy(hideEnabled = true)
+        manager.sync(root)
+        assertEquals(View.GONE, next.visibility)
+        manager.policy = manager.policy.copy(masterEnabled = false)
+        manager.restoreAll()
+        assertEquals(View.VISIBLE, next.visibility)
+        assertEquals(View.VISIBLE, video.visibility)
     }
 
     @Test fun fullClearNeverSuppressesAHostContainingTheVideoSurfaceAndRestoresNativeHiddenHosts() {

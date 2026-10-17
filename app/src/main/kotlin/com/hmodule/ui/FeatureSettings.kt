@@ -28,11 +28,13 @@ object FeatureSettings {
             })
             group = ui.card(activity); content.addView(group)
         }
-        fun toggle(title: String, description: String, key: String, action: (() -> Unit)? = null): Pair<LinearLayout, TextView> {
+        fun toggle(title: String, description: String, key: String,
+            defaultChecked: Boolean = false, indentDp: Int = 0,
+            onToggle: (() -> Unit)? = null, action: (() -> Unit)? = null): Pair<LinearLayout, TextView> {
             val row = LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 minimumHeight = ui.dp(activity, 72)
-                setPadding(ui.dp(activity, 20), ui.dp(activity, 12), ui.dp(activity, 16), ui.dp(activity, 12))
+                setPadding(ui.dp(activity, 20 + indentDp), ui.dp(activity, 12), ui.dp(activity, 16), ui.dp(activity, 12))
                 background = ui.ripple(activity)
             }
             val labels = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
@@ -43,8 +45,10 @@ object FeatureSettings {
             row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             val sw = Switch(activity).apply {
                 contentDescription = title; ui.styleSwitch(this)
-                isChecked = prefs.getBoolean(key, false)
-                setOnCheckedChangeListener { _, enabled -> prefs.edit().putBoolean(key, enabled).apply(); changed() }
+                isChecked = prefs.getBoolean(key, defaultChecked)
+                setOnCheckedChangeListener { _, enabled ->
+                    prefs.edit().putBoolean(key, enabled).apply(); changed(); onToggle?.invoke()
+                }
             }
             row.addView(sw)
             row.setOnClickListener { if (action != null) action() else sw.isChecked = !sw.isChecked }
@@ -56,7 +60,16 @@ object FeatureSettings {
         section("界面精简")
         toggle("隐藏状态栏", "视频页面沉浸显示", "status_bar")
         toggle("精简控件", "点击配置要隐藏的控件；开关控制整体启停", "control_hide") { settings.show(activity, changed) }
-        toggle("清屏播放", "隐藏播放页所有控件；退出后保留自定义隐藏规则", "guoplus_clean_screen")
+        lateinit var keepDanmakuRow: LinearLayout
+        toggle("清屏播放", "隐藏播放页所有控件；退出后保留自定义隐藏规则", "guoplus_clean_screen",
+            onToggle = {
+                keepDanmakuRow.visibility = if (prefs.getBoolean("guoplus_clean_screen", false))
+                    android.view.View.VISIBLE else android.view.View.GONE
+            })
+        keepDanmakuRow = toggle("保留弹幕", "清屏播放时继续显示视频中的弹幕内容", "keep_danmaku",
+            defaultChecked = true, indentDp = 12).first
+        keepDanmakuRow.visibility = if (prefs.getBoolean("guoplus_clean_screen", false))
+            android.view.View.VISIBLE else android.view.View.GONE
         val opacity = ui.settingsTitle(activity, "控件透明度").apply {
             setPadding(ui.dp(activity, 20), ui.dp(activity, 18), ui.dp(activity, 20), ui.dp(activity, 18))
             background = ui.ripple(activity)
@@ -95,7 +108,7 @@ object FeatureSettings {
             }
             dialog = ui.showPopup(activity, "默认倍速", options)
         }
-        toggle("双击打开评论区", "替换原双击点赞动作，双击直接打开评论", "double_tap_comment")
+        toggle("双击评论 / 清屏", "右半屏双击打开评论，左半屏双击切换清屏播放", "double_tap_comment")
         toggle("禁用下拉刷新", "禁用下拉手势，并折叠下拉刷新提示区域", "pull_refresh")
         toggle("顶部下滑拦截", "拦截从屏幕顶部（状态栏）区域向下滑的手势", "top_zone")
         section("内容与账号")

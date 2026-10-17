@@ -21,10 +21,10 @@ jobs:
       - name: Verify adaptation manifest
         run: python tools/update_adaptation_manifest.py --check
       - name: Test and build
-        run: bash gradlew testDebugUnitTest assembleDebug --console=plain
+        run: bash gradlew testReleaseUnitTest lintRelease assembleRelease --console=plain
       - uses: actions/upload-artifact@v4
         with:
-          name: HGModule-v1.0.0
+          name: HGModule-v1.1.0
           path: |
-            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
             adaptation/gp-*.json

@@ -12,12 +12,14 @@ enum class ControlTarget(val key: String, val title: String, val section: String
     FULLSCREEN_SWITCH("fullscreen_switch", "全屏切换", "播放操作"),
     EPISODE_SELECTOR("episode_selector", "选集与追剧入口", "播放操作"),
     PROGRESS("progress", "播放进度条", "播放操作"),
+    COIN_REWARD("coin_reward", "领金币", "播放操作"),
     AUTHOR_FOLLOW("author_follow", "作者头像与关注", "互动与弹幕"),
     FAVORITE("favorite", "收藏按钮", "互动与弹幕"),
     COMMENT("comment", "评论按钮", "互动与弹幕"),
     LIKE("like", "点赞按钮", "互动与弹幕"),
     SHARE("share", "分享按钮", "互动与弹幕"),
     DANMAKU_ENTRY("danmaku_entry", "发弹幕按钮", "互动与弹幕"),
+    SERIES_BANNER("series_banner", "系列剧横条", "短剧信息"),
     SERIES_INFO("series_info", "标题与作品信息", "短剧信息"),
     AUTHOR_DECLARATION("author_declaration", "作者声明", "短剧信息"),
     HOT_COMMENT("hot_comment", "热门评论", "短剧信息"),
@@ -40,6 +42,7 @@ data class ControlPolicy(
     val paused: Boolean = false,
     val opacityPercent: Int = 100,
     val fullClearEnabled: Boolean = false,
+    val keepDanmaku: Boolean = true,
 ) {
     /** Navigation remains configurable on every main tab; video effects stay on playback pages. */
     fun forPage(hasPlayer: Boolean): ControlPolicy = if (hasPlayer) this else copy(
@@ -54,8 +57,11 @@ data class ControlPolicy(
     val clearsAll: Boolean get() = cleanScreenEnabled && !temporarilyRestored
     val opacity: Float get() = opacityPercent.coerceIn(0, 100) / 100f
 
-    fun hides(target: ControlTarget): Boolean =
-        masterEnabled && (clearsAll || hideEnabled && target in selected)
+    fun hides(target: ControlTarget): Boolean = when {
+        !masterEnabled -> false
+        clearsAll -> true
+        else -> hideEnabled && target in selected
+    }
 
     fun alpha(original: Float): Float = if (masterEnabled && !temporarilyRestored) original * opacity else original
 

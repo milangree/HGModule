@@ -2,19 +2,19 @@
 
 面向红果短剧的 Xposed / LSPosed 模块，提供控件精简、清屏播放、画质与倍速设置。
 
-安装包名：`com.hmodule` · 应用名称：**果+** · 当前版本：**v1.0.0**
+安装包名：`com.hmodule` · 应用名称：**果+** · 当前版本：**v1.1.0**
 
-[源码仓库](https://github.com/wchunlin1006/HGModule) · [安装包](https://github.com/wchunlin1006/HGModule/releases/tag/v1.0.0) · [Hook JSON](https://github.com/wchunlin1006/HGModule/releases/tag/Adaptation) · [问题反馈](https://github.com/wchunlin1006/HGModule/issues)
+[源码仓库](https://github.com/wchunlin1006/HGModule) · [安装包](https://github.com/wchunlin1006/HGModule/releases/tag/v1.1.0) · [Hook JSON](https://github.com/wchunlin1006/HGModule/releases/tag/Adaptation) · [问题反馈](https://github.com/wchunlin1006/HGModule/issues)
 
 ## 功能
 
 | 分类 | 功能 |
 | --- | --- |
-| 精简控件 | 按顶部入口、播放操作、互动与弹幕、短剧信息、底部导航分组，逐项选择隐藏；开关统一启停 |
-| 清屏播放 | 隐藏播放页全部控件；退出后恢复未精简的控件；可从长按播放抽屉的“清屏播放（果+）”切换 |
+| 精简控件 | 按顶部入口、播放操作、互动与弹幕、短剧信息、底部导航分组，逐项选择隐藏，支持精简“领金币”悬浮球；开关统一启停 |
+| 清屏播放 | 隐藏播放页控件与状态栏，可保留滚动弹幕并隐藏发弹幕按钮；退出后恢复未精简的控件；可从长按播放抽屉的“清屏播放（果+）”切换 |
 | 暂停时退出清屏 | 暂停时临时显示未精简控件，继续播放后恢复清屏；精简选择保持有效 |
 | 显示设置 | 控件透明度、隐藏状态栏、隐藏系统导航小白条 |
-| 播放设置 | 默认画质（最高 1080P，不可用时按支持列表回退）、默认倍速、双击打开评论区 |
+| 播放设置 | 默认画质（最高 1080P，不可用时按支持列表回退）、默认倍速、左侧双击进入清屏播放、右侧双击打开评论区 |
 | 手势设置 | 禁用下拉刷新、顶部下滑拦截 |
 | 内容与账号 | 已适配的广告与挂件拦截、VIP 状态及图标相关 Hook；效果取决于客户端版本和业务逻辑 |
 
@@ -55,10 +55,10 @@
 ```bash
 git clone https://github.com/wchunlin1006/HGModule.git
 cd HGModule
-./gradlew testDebugUnitTest assembleDebug
+./gradlew testReleaseUnitTest lintRelease assembleRelease
 ```
 
-Windows 使用 `gradlew.bat testDebugUnitTest assembleDebug`。配置 `ANDROID_HOME` 或在 `local.properties` 中设置 SDK 路径。APK 输出在 `app/build/outputs/apk/debug/`。
+Windows 使用 `gradlew.bat testReleaseUnitTest lintRelease assembleRelease`。配置 `ANDROID_HOME` 或在 `local.properties` 中设置 SDK 路径。Release 构建开启 R8 优化与资源压缩，APK 输出在 `app/build/outputs/apk/release/`。
 
 签名配置参考 `keystore.properties.example`，自行创建 `keystore.properties`。发布构建应配置固定签名，覆盖安装需要保持签名一致。
 
