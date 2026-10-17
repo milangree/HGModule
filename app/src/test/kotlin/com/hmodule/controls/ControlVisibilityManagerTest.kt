@@ -367,7 +367,7 @@ class ControlVisibilityManagerTest {
             ControlTarget.SERIES_INFO), restoreOnPause = true, opacityPercent = 40, fullClearEnabled = true)
         manager.policy = configured.forPage(true)
         manager.sync(root)
-        assertEquals(View.INVISIBLE, nav.visibility)
+        assertEquals(View.GONE, nav.visibility)
         // The profile/theater pages have no active video; only bottom selections remain.
         repeat(2) {
             manager.policy = configured.forPage(false)
@@ -385,7 +385,7 @@ class ControlVisibilityManagerTest {
         }
         manager.policy = configured.forPage(true)
         manager.sync(root)
-        assertEquals(View.INVISIBLE, nav.visibility)
+        assertEquals(View.GONE, nav.visibility)
         manager.policy = configured.copy(fullClearEnabled = false).forPage(true)
         manager.sync(root)
         assertEquals(View.VISIBLE, nav.visibility)
@@ -488,7 +488,7 @@ class ControlVisibilityManagerTest {
         val playing = ControlPolicy(true, true, setOf(ControlTarget.SERIES_INFO), true, false, 0, true)
         manager.policy = playing
         manager.sync(root)
-        assertEquals(View.INVISIBLE, overlay.visibility)
+        assertEquals(View.GONE, overlay.visibility)
         manager.policy = playing.copy(paused = true)
         manager.sync(root)
         assertEquals(View.VISIBLE, overlay.visibility)
@@ -498,7 +498,7 @@ class ControlVisibilityManagerTest {
         assertEquals(1f, unselected.alpha, 0f)
         manager.policy = playing
         manager.sync(root)
-        assertEquals(View.INVISIBLE, overlay.visibility)
+        assertEquals(View.GONE, overlay.visibility)
         manager.policy = playing.copy(fullClearEnabled = false, paused = true)
         manager.sync(root)
         assertEquals(View.GONE, selected.visibility)
@@ -638,7 +638,7 @@ class ControlVisibilityManagerTest {
         manager.bind(selected, ControlTarget.PLAYBACK_SPEED)
         manager.policy = ControlPolicy(true, true, setOf(ControlTarget.PLAYBACK_SPEED), fullClearEnabled = true)
         manager.sync(root)
-        assertEquals(View.INVISIBLE, overlay.visibility)
+        assertEquals(View.GONE, overlay.visibility)
         assertEquals(View.VISIBLE, video.visibility)
         assertEquals(View.VISIBLE, gesture.visibility)
         manager.policy = manager.policy.copy(fullClearEnabled = false)
@@ -654,7 +654,7 @@ class ControlVisibilityManagerTest {
         assertEquals(View.GONE, selected.visibility)
         manager.policy = manager.policy.copy(paused = false)
         manager.sync(root)
-        assertEquals(View.INVISIBLE, overlay.visibility)
+        assertEquals(View.GONE, overlay.visibility)
     }
 
     @Test fun fullClearKeepsOnlyDanmakuBranchesByDefaultAndCanHideThemExplicitly() {
@@ -678,7 +678,7 @@ class ControlVisibilityManagerTest {
         assertEquals(View.INVISIBLE, other.visibility)
         manager.policy = manager.policy.copy(keepDanmaku = false)
         manager.sync(root)
-        assertEquals(View.INVISIBLE, overlay.visibility)
+        assertEquals(View.GONE, overlay.visibility)
         manager.policy = manager.policy.copy(keepDanmaku = true)
         manager.sync(root)
         assertEquals(View.VISIBLE, overlay.visibility)
@@ -773,7 +773,7 @@ class ControlVisibilityManagerTest {
         manager.policy = ControlPolicy(masterEnabled = true, fullClearEnabled = true)
         manager.sync(root)
         assertEquals(View.VISIBLE, videoHost.visibility)
-        assertEquals(View.INVISIBLE, manager.requestedVisibility(hiddenHost, View.GONE))
+        assertEquals(View.GONE, manager.requestedVisibility(hiddenHost, View.GONE))
         manager.restoreAll()
         assertEquals(View.GONE, hiddenHost.visibility)
     }

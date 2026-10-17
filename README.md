@@ -2,9 +2,9 @@
 
 面向红果短剧的 Xposed / LSPosed 模块，提供控件精简、清屏播放、画质与倍速设置。
 
-安装包名：`com.hmodule` · 应用名称：**果+** · 当前版本：**v1.1.0**
+安装包名：`com.hmodule` · 应用名称：**果+** · 当前版本：**v1.1.1**
 
-[源码仓库](https://github.com/wchunlin1006/HGModule) · [安装包](https://github.com/wchunlin1006/HGModule/releases/tag/v1.1.0) · [Hook JSON](https://github.com/wchunlin1006/HGModule/releases/tag/Adaptation) · [问题反馈](https://github.com/wchunlin1006/HGModule/issues)
+[源码仓库](https://github.com/wchunlin1006/HGModule) · [安装包](https://github.com/wchunlin1006/HGModule/releases/tag/v1.1.1) · [Hook JSON](https://github.com/wchunlin1006/HGModule/releases/tag/Adaptation) · [问题反馈](https://github.com/wchunlin1006/HGModule/issues)
 
 ## 功能
 
